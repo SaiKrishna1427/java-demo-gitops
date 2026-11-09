@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: java-demo
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: java-demo
+  template:
+    metadata:
+      labels:
+        app: java-demo
+    spec:
+      imagePullSecrets:
+        - name: ecr-secret
+      containers:
+        - name: java-demo
+          image: 911167916341.dkr.ecr.ap-southeast-5.amazonaws.com/testing:6582e077
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
