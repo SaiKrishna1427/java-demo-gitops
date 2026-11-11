@@ -1,93 +1,197 @@
-# java-demo-gitops
+# End-to-End Java CI/CD and GitOps on AWS EKS
 
+[![GitLab CI/CD](https://img.shields.io/badge/CI%2FCD-GitLab-orange)](#cicd-pipeline) [![GitOps](https://img.shields.io/badge/GitOps-Argo%20CD-blue)](#gitops-deployment) [![Kubernetes](https://img.shields.io/badge/Kubernetes-AWS%20EKS-326ce5)](#technology-stack) [![Security](https://img.shields.io/badge/Security-Trivy-brightgreen)](#container-security)
 
+A hands-on DevOps project that automates the build, test, containerization, security scanning, and deployment of a Java application to **Amazon EKS**. A self-hosted GitLab CI/CD pipeline builds and publishes versioned images to **Amazon ECR**, updates a separate GitOps repository over SSH, and triggers **Argo CD** to reconcile the Kubernetes cluster from Git.
 
-## Getting started
+The workflow was validated end-to-end by accessing the updated application in a browser. **Argo CD self-healing and Git-based rollback were also tested successfully.**
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+> **Portfolio note:** This README intentionally omits private GitLab addresses, AWS account identifiers, cluster names, credentials, and internal networking details. Replace placeholders with public-safe links before publishing.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## Architecture
 
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
-
+```mermaid
+flowchart TD
+    A[Developer pushes Java code] --> B[Self-hosted GitLab CI/CD]
+    B --> C[Maven build and tests]
+    C --> D[Docker build and push]
+    D --> E[Amazon ECR]
+    D --> F[Trivy image vulnerability scan]
+    F --> G[Update GitOps manifest via SSH]
+    G --> H[Private GitLab GitOps repository]
+    H --> I[GitLab push mirror]
+    I --> J[Public GitHub GitOps mirror]
+    J --> K[Argo CD auto-sync]
+    K --> L[Amazon EKS Deployment and Service]
+    L --> M[Java application]
 ```
-cd existing_repo
-git remote add origin http://172.168.10.40/saikrishna/java-demo-gitops.git
-git branch -M main
-git push -uf origin main
+
+**Why the GitHub mirror?** The EKS-hosted Argo CD instance could not directly reach the private, office-hosted GitLab server. GitLab push mirroring makes the Kubernetes manifests available to Argo CD through a GitHub repository. The CI job uses a dedicated SSH key to update the original GitLab GitOps repository.
+
+## Technology stack
+
+| Area | Technologies |
+| --- | --- |
+| Application | Java, Maven |
+| Source control and CI/CD | Self-hosted GitLab, GitLab Runner (Docker executor) |
+| Containers | Docker, Amazon ECR |
+| Container security | Trivy |
+| GitOps | GitLab GitOps repository, GitHub push mirror, Argo CD |
+| Orchestration | Kubernetes, Amazon EKS |
+| Authentication | SSH deploy key, protected CI/CD variables, AWS IAM credentials |
+
+## Repository layout
+
+The solution uses **two logical repositories**:
+
+**1. Java application repository (self-hosted GitLab)**
+
+```text
+java-application/
+├── src/
+├── pom.xml
+├── Dockerfile
+└── .gitlab-ci.yml
 ```
 
-## Integrate with your tools
+**2. GitOps repository (GitLab, mirrored to GitHub)**
 
-- [ ] [Set up project integrations](http://172.168.10.40/saikrishna/java-demo-gitops/-/settings/integrations)
+```text
+java-demo-gitops/
+└── k8s/
+    ├── deployment.yaml
+    ├── service.yaml
+    └── kustomization.yaml
+```
 
-## Collaborate with your team
+The GitOps repository stores the **actual immutable ECR image reference**, including the commit-based tag. It does **not** contain unexpanded GitLab CI variable placeholders.
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+## CI/CD pipeline
 
-## Test and Deploy
+| Stage | Job | Purpose |
+| --- | --- | --- |
+| `build` | `build_java` | Compile and package the Java application using Maven; publish JAR artifact |
+| `test` | `test_java` | Run Maven tests |
+| `publish` | `docker_build_push` | Build Docker image, tag with `$CI_COMMIT_SHORT_SHA`, and push to ECR |
+| `security` | `trivy_scan` | Scan the built image for HIGH and CRITICAL vulnerabilities and save a report |
+| `update-gitops` | `update_gitops` | Update the image tag in the GitOps Deployment manifest and push via SSH |
 
-Use the built-in continuous integration in GitLab.
+The GitOps update job depends on the Trivy job completing successfully. **A completed scan is not automatically a vulnerability-enforcement gate:** Trivy's `--exit-code 0` reports findings without failing the job; `--exit-code 1` can block the GitOps update when matching vulnerabilities are found. Set the policy deliberately based on your security requirements.
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+### Image versioning
 
-***
+Each image is tagged with the source commit's short SHA, making it straightforward to associate an image with a specific build:
 
-# Editing this README
+```text
+<account-id>.dkr.ecr.<region>.amazonaws.com/<repository>:<commit-short-sha>
+```
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+The CI pipeline updates only the image reference in `k8s/deployment.yaml`, commits the manifest change, and pushes it to the GitOps repository.
 
-## Suggestions for a good README
+## GitOps deployment
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+1. A developer commits a Java application change to the protected source branch.
+2. GitLab CI builds and tests the application, then builds and pushes a Docker image to ECR.
+3. Trivy scans the image and publishes its report as a CI artifact.
+4. The GitOps update job connects to the private GitLab repository using SSH and commits the new image tag.
+5. GitLab mirrors the GitOps commit to GitHub.
+6. Argo CD detects the desired-state change and automatically syncs the Kubernetes Deployment on EKS.
+7. The updated application is verified through its browser-accessible endpoint (`/user`).
 
-## Name
-Choose a self-explaining name for your project.
+### Self-healing — verified
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+With Argo CD automated sync and `selfHeal` enabled, a manual change to the live Deployment replica count was automatically reconciled back to the count declared in Git. This demonstrates configuration-drift correction.
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+### Git-based rollback — verified
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+A previous working image tag was restored in the GitOps Deployment manifest and committed to Git. After mirroring and Argo CD synchronization, the earlier application version was restored and verified. **Rollback was performed through Git**, rather than relying on a manual `kubectl rollout undo` that could conflict with the desired state.
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+## Container security
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+Trivy runs as a separate GitLab CI job after image publishing. The scan targets HIGH and CRITICAL vulnerabilities and creates a downloadable `trivy-report.txt` artifact.
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+Example scan command:
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+```sh
+trivy image --image-src docker --scanners vuln --severity HIGH,CRITICAL --timeout 90m --exit-code 0 --format table --output trivy-report.txt "$IMAGE_URI"
+```
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+The project encountered a slow vulnerability-database download and a malformed multiline command during integration. The scan was stabilized by increasing the timeout, caching Trivy data, and using a single-line invocation.
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+> **Deployment gate configuration:** The tested scan pipeline completed successfully. To enforce a vulnerability-based gate, change `--exit-code 0` to `--exit-code 1` and validate the expected failure behavior. This README does not claim that enforcement has been tested.
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+## CI/CD and access security
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+- Protected source branch and protected GitLab CI/CD variables.
+- Dedicated SSH key for CI-to-GitOps Git operations; no Git access token transmitted over plain HTTP.
+- Verified SSH host-key material used by CI to validate the GitLab server identity.
+- Repository-scoped write access should be granted only where required.
+- AWS IAM permissions should be limited to required ECR operations and resources.
+- Docker socket access is sensitive: the self-hosted Docker executor should run only trusted pipelines on an appropriately isolated runner.
+- No credentials, private SSH keys, or internal-only addresses are included in this public documentation.
 
-## License
-For open source projects, say how it is licensed.
+## Verification commands
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Replace the placeholders with the resource names used in your environment.
+
+```sh
+# Confirm the image currently specified by the Deployment
+kubectl get deployment java-demo -n java-demo-gitops \
+  -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+# Check rollout completion
+kubectl rollout status deployment/java-demo -n java-demo-gitops
+
+# Inspect running Pods
+kubectl get pods -n java-demo-gitops
+
+# Check Argo CD Application sync and health
+kubectl get application java-demo -n argocd
+```
+
+## Challenges and lessons learned
+
+| Challenge | Resolution / learning |
+| --- | --- |
+| Argo CD could not reach private office GitLab | Configured GitLab-to-GitHub push mirroring and pointed Argo CD at GitHub |
+| GitLab did not support HTTPS | Used SSH authentication for CI Git operations instead of sending access tokens over HTTP |
+| CI SSH private key failed to parse (`libcrypto`) | Corrected CI file-variable key formatting and line endings |
+| Trivy vulnerability DB download timed out | Increased timeout and configured a reusable cache |
+| Trivy command failed with “Require at least 1 argument” | Simplified command formatting so the image reference is passed correctly |
+| Manual Kubernetes changes caused configuration drift | Enabled and tested Argo CD self-healing |
+| Need to recover a prior application version | Restored the earlier image tag through a GitOps commit |
+
+## Suggested screenshots
+
+Added sanitized screenshots under `docs/images/` and linked them here:
+
+1. GitLab pipeline with all five stages passing.
+   ![alt text](docs/images/image.png)
+2. Trivy scan job and vulnerability-report artifact (redact account IDs and private URLs).
+3. Argo CD Application showing `Synced` and `Healthy`.
+   ![alt text](docs/images/image_1.png)
+4. Kubernetes Deployment and Pods after reconciliation.
+5. Application response in the browser after deployment.
+6. GitOps commit history showing an image update and rollback.
+   ![alt text](docs/images/image_2.png)
+   
+
+## Project outcomes
+
+- Built a working Java application CI/CD pipeline with Maven, Docker, GitLab Runner, and ECR.
+- Automated Kubernetes image updates through a separate GitOps repository.
+- Integrated GitLab-to-GitHub mirroring to bridge network reachability constraints.
+- Deployed changes automatically to EKS using Argo CD.
+- Verified application updates, configuration self-healing, and Git-based rollback.
+- Integrated Trivy vulnerability reporting and applied CI/CD credential and branch protections.
+
+## Further improvements
+
+- Enforce and test a vulnerability-based Trivy deployment gate (`--exit-code 1`).
+- Prefer short-lived AWS credentials where supported and further restrict ECR IAM policies.
+- Isolate Docker socket access and restrict runner execution to trusted code.
+- Add automated integration tests, policy checks, and monitoring as future enhancements.
+
+---
+
+**Status:** End-to-end deployment, Trivy scanning, self-healing, and Git-based rollback have been successfully exercised. This is a learning and portfolio implementation; production deployment would require environment-specific security, availability, and operational reviews.
