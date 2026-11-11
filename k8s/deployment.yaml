@@ -17,7 +17,7 @@ spec:
         - name: ecr-secret
       containers:
         - name: java-demo
-          image: 911167916341.dkr.ecr.ap-southeast-5.amazonaws.com/testing:6582e077
+          image: 911167916341.dkr.ecr.ap-southeast-5.amazonaws.com/testing:6131a552
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
