@@ -1,0 +1,158 @@
+
+stages:
+  - build
+  - test
+  - publish
+  - security
+  - update-gitops
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository"
+
+cache:
+  key: maven-dependencies
+  paths:
+    - .m2/repository/
+
+build_java:
+  stage: build
+  image: maven:3.9-eclipse-temurin-17
+  tags:
+    - local-docker
+  script:
+    - mvn -B -DskipTests package
+    - ls -lh target/
+  artifacts:
+    paths:
+      - target/*.jar
+    expire_in: 1 day
+
+test_java:
+  stage: test
+  image: maven:3.9-eclipse-temurin-17
+  tags:
+    - local-docker
+  script:
+    - mvn -B test
+
+docker_build_push:
+  stage: publish
+  image: docker:29-cli
+  tags:
+    - local-docker
+  needs:
+    - job: build_java
+      artifacts: true
+    - job: test_java
+      artifacts: false
+  before_script:
+    - apk add --no-cache aws-cli
+  script:
+    - export ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+    - export IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${CI_COMMIT_SHORT_SHA}"
+    - aws sts get-caller-identity --query Arn --output text
+    - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+    - docker build -t "$IMAGE_URI" .
+    - docker push "$IMAGE_URI"
+    - echo "Successfully pushed $IMAGE_URI"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: on_success
+    - when: never
+
+trivy_scan:
+  stage: security
+  image:
+    name: aquasec/trivy:0.69.3
+    entrypoint: [""]
+  tags:
+    - local-docker
+  needs:
+    - job: docker_build_push
+      artifacts: false
+  variables:
+    TRIVY_CACHE_DIR: ".trivycache/"
+  script:
+    - |
+      set -eu
+
+      IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY}:${CI_COMMIT_SHORT_SHA}"
+
+      echo "Scanning image: ${IMAGE_URI}"
+
+      trivy image --image-src docker --scanners vuln --severity HIGH,CRITICAL --timeout 90m --exit-code 0 --format table --output trivy-report.txt "$IMAGE_URI"
+
+      cat trivy-report.txt
+  artifacts:
+    when: always
+    paths:
+      - trivy-report.txt
+    expire_in: 7 days
+  cache:
+    key: trivy-db
+    paths:
+      - .trivycache/
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: on_success
+    - when: never
+
+update_gitops:
+  stage: update-gitops
+  image: alpine:3.20
+  tags:
+    - local-docker
+  needs:
+    - job: trivy_scan
+      artifacts: false
+  resource_group: java-demo-gitops-main
+
+  before_script:
+    - apk add --no-cache git openssh-client
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - cp "$GITOPS_SSH_PRIVATE_KEY" ~/.ssh/id_ed25519
+    - chmod 600 ~/.ssh/id_ed25519
+    - cp "$GITOPS_SSH_KNOWN_HOSTS" ~/.ssh/known_hosts
+    - chmod 600 ~/.ssh/known_hosts
+
+  script:
+    - |
+      set -eu
+
+      IMAGE_REPO="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY}"
+      IMAGE_TAG="${CI_COMMIT_SHORT_SHA}"
+
+      git clone --branch main "$GITOPS_REPO_URL" gitops
+      cd gitops
+
+      git config user.name "GitLab CI"
+      git config user.email "gitlab-ci@example.invalid"
+
+      MANIFEST="k8s/deployment.yaml"
+
+      if ! grep -Fq "image: ${IMAGE_REPO}:" "$MANIFEST"; then
+        echo "ERROR: Expected ECR image not found."
+        exit 1
+      fi
+
+      sed -i \
+        "s|image: ${IMAGE_REPO}:.*|image: ${IMAGE_REPO}:${IMAGE_TAG}|" \
+        "$MANIFEST"
+
+      if git diff --quiet; then
+        echo "Image tag is already current."
+        exit 0
+      fi
+
+      git add "$MANIFEST"
+      git commit -m "ci: deploy Java image ${IMAGE_TAG}"
+      git push origin HEAD:main
+
+      echo "GitOps repository updated successfully."
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: on_success
+    - when: never
+
